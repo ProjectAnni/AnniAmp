@@ -5,10 +5,16 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.database.MatrixCursor.RowBuilder
 import android.graphics.Point
+import android.net.Uri
+import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
+import android.provider.MediaStore
+import android.text.TextUtils
+import android.util.Log
+import androidx.room.Room
 import com.maxmpz.poweramp.player.TrackProviderConsts
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
@@ -17,9 +23,13 @@ import io.ktor.client.features.json.*
 import io.ktor.client.request.*
 import io.ktor.http.*
 import kotlinx.coroutines.runBlocking
+import moe.mmf.anni_amp.repo.RepoDatabase
+import moe.mmf.anni_amp.repo.entities.Album
+import moe.mmf.anni_amp.repo.entities.Track
 
 class AnniProvider : DocumentsProvider() {
     private lateinit var client: HttpClient
+    private lateinit var db: RepoDatabase
 
     override fun onCreate(): Boolean {
         this.client = HttpClient(CIO) {
@@ -32,15 +42,13 @@ class AnniProvider : DocumentsProvider() {
                 url {
                     protocol = URLProtocol.HTTP
                 }
-                headers {
-                    // TODO: replace debug token
-                    this.append(
-                        "Authorization",
-                        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjAsInR5cGUiOiJ1c2VyIiwidXNlcm5hbWUiOiJ0ZXN0IiwiYWxsb3dTaGFyZSI6dHJ1ZX0.7CH27OBvUnJhKxBdtZbJSXA-JIwQ4MWqI5JsZ46NoKk"
-                    )
-                }
+                header("Authorization", Companion.Token)
             }
         }
+        this.db = Room.databaseBuilder(
+            context!!,
+            RepoDatabase::class.java, "anni-db2",
+        ).build()
         return true
     }
 
@@ -55,7 +63,7 @@ class AnniProvider : DocumentsProvider() {
         DocumentsContract.Root.COLUMN_DOCUMENT_ID
     )
 
-    override fun queryRoots(projection: Array<out String>?): Cursor? {
+    override fun queryRoots(projection: Array<out String>?): Cursor {
         val result = MatrixCursor(resolveRootProjection(projection))
 
         result.newRow().apply {
@@ -64,7 +72,7 @@ class AnniProvider : DocumentsProvider() {
             add(DocumentsContract.Root.COLUMN_SUMMARY, "Yesterday17's Annil Library")
 
             add(DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
-            add(DocumentsContract.Root.COLUMN_ICON, R.drawable.ic_launcher_foreground)
+            add(DocumentsContract.Root.COLUMN_ICON, R.mipmap.ic_launcher)
             add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "annil")
         }
 
@@ -81,24 +89,59 @@ class AnniProvider : DocumentsProvider() {
         parentDocumentId: String?,
         projection: Array<out String>?,
         sortOrder: String?
-    ): Cursor? {
+    ): Cursor {
         return MatrixCursor(resolveDocumentProjection(projection)).apply {
             if (parentDocumentId.equals("annil")) {
                 // root
                 val response: List<String> = runBlocking {
-                    // TODO: Specify host
                     client.get(path = "albums")
                 }
-                response.map { fillFolderRow(it, this.newRow(), TrackProviderConsts.FLAG_NO_SUBDIRS) }
-            } else {
-                // TODO: show tracks from metadata repository
+                for (catalog in response) {
+                    val album = db.albumDao().getAlbum(catalog)
+                    if (album != null) {
+                        fillAlbumRow(
+                            this.newRow(),
+                            album,
+                            TrackProviderConsts.FLAG_NO_SUBDIRS
+                        )
+                    }
+                }
+            } else if (parentDocumentId != null) {
+                // parentDocumentId is catalog
+                val tracks = db.trackDao().getAllTracks(parentDocumentId.split("/")[1])
+                tracks?.forEach {
+                    fillURLTrackRow(this.newRow(), it, false)
+                }
             }
         }
     }
 
-    override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor? {
+    override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
         return MatrixCursor(resolveDocumentProjection(projection)).apply {
-            fillFolderRow(documentId, this.newRow(), TrackProviderConsts.FLAG_HAS_SUBDIRS)
+            if (documentId.equals("annil")) {
+                fillFolderRow(this.newRow(), documentId, documentId, TrackProviderConsts.FLAG_HAS_SUBDIRS)
+            } else if (!documentId.contains("/")) {
+                val album = db.albumDao().getAlbum(documentId)
+                if (album != null) {
+                    fillAlbumRow(this.newRow(), album, TrackProviderConsts.FLAG_HAS_SUBDIRS)
+                }
+            } else {
+                val splited = documentId.split("/")
+                val catalog = splited[1]
+                if (splited.size == 2) {
+                    // annil/{catalog}
+                    val album = db.albumDao().getAlbum(catalog)
+                    if (album != null) {
+                        fillAlbumRow(this.newRow(), album, TrackProviderConsts.FLAG_HAS_SUBDIRS)
+                    }
+                } else if (splited.size == 3) {
+                    val trackNumber = splited[2].toInt()
+                    val track = db.trackDao().getTrack(catalog, trackNumber)
+                    if (track != null) {
+                        fillURLTrackRow(this.newRow(), track, true)
+                    }
+                }
+            }
         }
     }
 
@@ -115,11 +158,15 @@ class AnniProvider : DocumentsProvider() {
         return projection ?: DEFAULT_DOCUMENT_PROJECTION
     }
 
-    private fun fillFolderRow(documentId: String, row: RowBuilder, flags: Int) {
-        row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId)
+    private fun fillAlbumRow(row: RowBuilder, album: Album, flags: Int) {
+        fillFolderRow(row, "annil/${album.catalog}", album.title, flags)
+    }
+
+    private fun fillFolderRow(row: RowBuilder, id: String, name: String, flags: Int) {
+        row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, id)
         row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.MIME_TYPE_DIR)
-        row.add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, documentId)
-//        row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, mApkInstallTime)
+        row.add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, name)
+        row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, 0)
         row.add(
             DocumentsContract.Document.COLUMN_FLAGS,
             DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
@@ -127,6 +174,34 @@ class AnniProvider : DocumentsProvider() {
         // If asked to add the subfolders hint, add it
         if (flags != 0) {
             row.add(TrackProviderConsts.COLUMN_FLAGS, flags)
+        }
+    }
+
+    private fun fillTrackRow(row: RowBuilder, track: Track) {
+        row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, "annil/${track.catalog}/${track.track}")
+        row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, "audio/flac")
+        row.add(
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            "%02d. %s.flac".format(track.track, track.title)
+        )
+        row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, 0)
+    }
+
+    private fun fillURLTrackRow(row: RowBuilder, track: Track, sendMetadata: Boolean) {
+        fillTrackRow(row, track)
+
+//        row.add(DocumentsContract.Document.COLUMN_FLAGS, DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL)
+        row.add(TrackProviderConsts.COLUMN_URL, TrackProviderConsts.DYNAMIC_URL)
+        row.add(MediaStore.Audio.AudioColumns.DURATION, 0)
+
+        if (sendMetadata) {
+            val album = db.albumDao().getAlbum(track.catalog)!!
+            row.add(MediaStore.MediaColumns.TITLE, track.title)
+            row.add(MediaStore.Audio.AudioColumns.ARTIST, track.artist)
+            row.add(MediaStore.Audio.AudioColumns.ALBUM, album.title)
+            row.add(MediaStore.Audio.AudioColumns.YEAR, album.releaseDate)
+            row.add(TrackProviderConsts.COLUMN_ALBUM_ARTIST, album.artist)
+            row.add(MediaStore.Audio.AudioColumns.TRACK, track.track)
         }
     }
 
@@ -140,5 +215,40 @@ class AnniProvider : DocumentsProvider() {
 
     override fun openDocument(documentId: String?, mode: String?, signal: CancellationSignal?): ParcelFileDescriptor? {
         return null
+    }
+
+    override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
+        val res = super.call(method, arg, extras)
+        if (res == null) {
+            if (TrackProviderConsts.CALL_GET_URL == method) {
+                return handleGetUrl(arg, extras)
+//            } else if (TrackProviderConsts.CALL_RESCAN == method) {
+//                return handleRescan(arg, extras)
+//            } else if (TrackProviderConsts.CALL_GET_DIR_METADATA == method) {
+//                return handleGetDirMetadata(arg, extras)
+            }
+        }
+        return res
+    }
+
+    private fun handleGetUrl(arg: String?, extras: Bundle?): Bundle? {
+        require(!TextUtils.isEmpty(arg))
+
+        val res = Bundle()
+        val splited = arg!!.split("%2F")
+        val url = "${Companion.BaseUrl}/${splited[1]}/${splited[2]}"
+        res.putString(TrackProviderConsts.COLUMN_URL, url)
+        res.putString(TrackProviderConsts.COLUMN_HEADERS, "Authorization:${Companion.Token}")
+        return res
+    }
+
+    override fun isChildDocument(parentDocumentId: String?, documentId: String?): Boolean {
+        return true
+    }
+
+    companion object {
+        private const val BaseUrl: String = "http://10.0.2.2:3614"
+        private const val Token: String =
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjAsInR5cGUiOiJ1c2VyIiwidXNlcm5hbWUiOiJ0ZXN0IiwiYWxsb3dTaGFyZSI6dHJ1ZX0.7CH27OBvUnJhKxBdtZbJSXA-JIwQ4MWqI5JsZ46NoKk"
     }
 }
