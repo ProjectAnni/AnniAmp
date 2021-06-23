@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="moe.mmf.anni_amp">
 
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
     <application
             android:allowBackup="true"
             android:icon="@mipmap/ic_launcher"
@@ -9,6 +12,22 @@
             android:roundIcon="@mipmap/ic_launcher_round"
             android:supportsRtl="true"
             android:theme="@style/Theme.AnniAmp">
+        <provider
+                android:name="moe.mmf.anni_amp.AnniProvider"
+                android:authorities="moe.mmf.anni_amp"
+                android:grantUriPermissions="true"
+                android:exported="true"
+                android:permission="android.permission.MANAGE_DOCUMENTS"
+                android:icon="@mipmap/ic_launcher"
+        >
+            <!-- This meta allows Poweramp to identify tracks provider and enables it for Poweramp -->
+            <meta-data android:name="com.maxmpz.PowerampTrackProvider" android:value="true"/>
+
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER"/>
+            </intent-filter>
+        </provider>
+
         <activity android:name=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
