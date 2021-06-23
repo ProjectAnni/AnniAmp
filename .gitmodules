@@ -1,0 +1,3 @@
+[submodule "powerampapi"]
+	path = powerampapi
+	url = https://github.com/maxmpz/powerampapi.git
