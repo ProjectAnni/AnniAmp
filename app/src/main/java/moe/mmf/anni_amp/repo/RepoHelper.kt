@@ -14,7 +14,8 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
 
     fun initialize(db: RepoDatabase) {
         if (root.exists()) {
-            Git.open(root).pull()
+            return
+//            Git.open(root).pull()
         } else {
             Git.cloneRepository()
                 .setURI(repo)
@@ -26,7 +27,7 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
             .maxDepth(1)
             .forEach {
                 // ignore root
-                if (!it.equals(albumRoot)) {
+                if (it != albumRoot) {
                     val result: TomlParseResult = Toml.parse(Path(it.path))
                     if (!result.hasErrors()) {
                         // only apply albums with no error
@@ -72,5 +73,6 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
                     }
                 }
             }
+        print("finished")
     }
 }
