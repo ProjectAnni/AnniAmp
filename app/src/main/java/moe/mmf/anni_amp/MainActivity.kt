@@ -11,19 +11,22 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        thread {
-            val db = Room.databaseBuilder(
-                applicationContext,
-                RepoDatabase::class.java, "anni-db",
-            ).build()
 
-            val repo = RepoHelper(
-                "Test",
-                "https://github.com/project-anni/repo.git",
-                applicationContext.dataDir,
-            )
-            repo.initialize(db)
-            db.close()
+        val repo = RepoHelper(
+            "Test",
+            "https://github.com/project-anni/repo.git",
+            applicationContext.dataDir,
+        )
+        if (repo.needInitialize()) {
+            thread {
+                val db = Room.databaseBuilder(
+                    applicationContext,
+                    RepoDatabase::class.java, "anni-db",
+                ).build()
+
+                repo.initialize(db)
+                db.close()
+            }
         }
     }
 }

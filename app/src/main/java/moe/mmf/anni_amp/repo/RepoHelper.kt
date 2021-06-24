@@ -12,16 +12,15 @@ import kotlin.io.path.Path
 class RepoHelper(private var name: String, private var repo: String, root: File) {
     private var root: File = File(root, name)
 
+    fun needInitialize(): Boolean {
+        return !root.exists()
+    }
+
     fun initialize(db: RepoDatabase) {
-        if (root.exists()) {
-            return
-//            Git.open(root).pull()
-        } else {
-            Git.cloneRepository()
-                .setURI(repo)
-                .setDirectory(root)
-                .call()
-        }
+        Git.cloneRepository()
+            .setURI(repo)
+            .setDirectory(root)
+            .call()
         val albumRoot = File(root, "album")
         albumRoot.walkTopDown()
             .maxDepth(1)

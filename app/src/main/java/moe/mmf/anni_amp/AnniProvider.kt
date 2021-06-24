@@ -45,11 +45,9 @@ class AnniProvider : DocumentsProvider() {
                 serializer = GsonSerializer()
             }
             defaultRequest {
-//                host = "annil.mmf.moe"
-                host = "192.168.114.1"
-                port = 3614
+                host = "annil.mmf.moe"
                 url {
-                    protocol = URLProtocol.HTTP
+                    protocol = URLProtocol.HTTPS
                 }
                 header("Authorization", Token)
             }
@@ -205,16 +203,7 @@ class AnniProvider : DocumentsProvider() {
         if (!file.exists()) {
             runBlocking {
                 client.get<HttpStatement>(path = "${URLEncoder.encode(catalog, "utf-8")}/cover")
-                    .execute { httpResponse ->
-                        val channel: ByteReadChannel = httpResponse.receive()
-                        while (!channel.isClosedForRead) {
-                            val packet = channel.readRemaining(DEFAULT_BUFFER_SIZE.toLong())
-                            while (!packet.isEmpty) {
-                                val bytes = packet.readBytes()
-                                file.appendBytes(bytes)
-                            }
-                        }
-                    }
+                    .execute { saveChannelToFile(it.receive(), file) }
             }
         }
         return AssetFileDescriptor(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY), 0, 0)
@@ -255,16 +244,7 @@ class AnniProvider : DocumentsProvider() {
                                 size = response.headers["X-Origin-Size"]!!.toLong()
                                 db.cacheDao().insert(Cache(0, catalog, trackId, size))
                             }
-
-                            // download file
-                            val channel: ByteReadChannel = response.receive()
-                            while (!channel.isClosedForRead) {
-                                val packet = channel.readRemaining(DEFAULT_BUFFER_SIZE.toLong())
-                                while (!packet.isEmpty) {
-                                    val bytes = packet.readBytes()
-                                    file.appendBytes(bytes)
-                                }
-                            }
+                            saveChannelToFile(response.receive(), file)
                         } else {
                             // update size with data stored in db
                             size = cacheInDb.size
@@ -368,14 +348,23 @@ class AnniProvider : DocumentsProvider() {
         }
     }
 
+    // save file
+    private suspend fun saveChannelToFile(channel: ByteReadChannel, file: File) {
+        while (!channel.isClosedForRead) {
+            val packet = channel.readRemaining(DEFAULT_BUFFER_SIZE.toLong())
+            while (!packet.isEmpty) {
+                val bytes = packet.readBytes()
+                file.appendBytes(bytes)
+            }
+        }
+    }
+
     override fun isChildDocument(parentDocumentId: String?, documentId: String?): Boolean {
         return true
     }
 
     companion object {
-        private const val BaseUrl: String = "http://192.168.114.1:3614"
         private const val Token: String =
-//            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE2MTkwNzQ1NDcsInR5cGUiOiJ1c2VyIiwidXNlcm5hbWUiOiJ0ZXN0IiwiYWxsb3dTaGFyZSI6dHJ1ZX0.z7ZsL9nqP1KDZhLjtsUzSn5bhx8-01w2XOVFdazRtVo"
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjAsInR5cGUiOiJ1c2VyIiwidXNlcm5hbWUiOiJ0ZXN0IiwiYWxsb3dTaGFyZSI6dHJ1ZX0.7CH27OBvUnJhKxBdtZbJSXA-JIwQ4MWqI5JsZ46NoKk"
     }
 }
