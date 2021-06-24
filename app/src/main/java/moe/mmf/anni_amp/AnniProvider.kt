@@ -36,7 +36,6 @@ import moe.mmf.anni_amp.repo.entities.Cache
 import moe.mmf.anni_amp.repo.entities.Track
 import java.io.Closeable
 import java.io.File
-import java.io.FileInputStream
 import java.io.IOException
 import kotlin.concurrent.thread
 
@@ -240,13 +239,18 @@ class AnniProvider : DocumentsProvider() {
 
         val directory = File(context!!.getExternalFilesDir(Environment.DIRECTORY_MUSIC), split[0])
         val file = File(directory, "$trackId.flac")
+        if (!file.exists()) {
+            directory.mkdirs()
+        }
+        if (!file.exists()) {
+            file.createNewFile()
+        }
 
         val cache = db.cacheDao().getCache(catalog, trackId)
         var size = cache?.size ?: 0
         var requested = file.exists()
 
-        if (!file.exists()) {
-            directory.mkdirs()
+        if (file.length() == 0L) {
             thread {
                 runBlocking {
                     client.get<HttpStatement>(path = documentId).execute { response ->
@@ -261,27 +265,22 @@ class AnniProvider : DocumentsProvider() {
                         // else, start download
                         //
                         // if cacheInDb, it file should exist
-                        // if file does not exist, we need to download it again
-                        if (cacheInDb == null || !file.exists()) {
-                            // remove file if exists
-                            // this should not happen
-                            if (file.exists()) {
-                                file.delete()
+                        // if file does not exist or length == 0, we need to download it again
+                        if (cacheInDb == null || file.length() == 0L) {
+                            if (cacheInDb == null) {
+                                // write size into db after first appendBytes
+                                size = response.headers["X-Origin-Size"]!!.toLong()
+                                db.cacheDao().insert(Cache(0, catalog, trackId, size))
                             }
 
                             // download file
                             val channel: ByteReadChannel = response.receive()
                             while (!channel.isClosedForRead) {
-                                val packet = channel.readRemaining(DEFAULT_BUFFER_SIZE.toLong())
+                                val packet = channel.readRemaining(DEFAULT_BUFFER_SIZE.toLong() * 8)
                                 while (!packet.isEmpty) {
                                     val bytes = packet.readBytes()
                                     file.appendBytes(bytes)
 
-                                    if (!requested) {
-                                        // write size into db after first appendBytes
-                                        size = response.headers["X-Origin-Size"]!!.toLong()
-                                        db.cacheDao().insert(Cache(0, catalog, trackId, size))
-                                    }
                                     // allow GetSize to read the correct size after bytes appended
                                     requested = true
                                 }
@@ -296,17 +295,22 @@ class AnniProvider : DocumentsProvider() {
             }
         }
 
+        val afd = AssetFileDescriptor(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY), 0, -1)
+        // file fully cached, use raw fd
+        if (cache != null && file.length() == size) {
+            return afd.parcelFileDescriptor
+        }
+
+        // play while caching
         val thread = HandlerThread(documentId)
         thread.start()
         val handler = Handler(thread.looper)
-        var fis: FileInputStream? = null
 
         val storage = context?.getSystemService(Context.STORAGE_SERVICE) as StorageManager
         return storage.openProxyFileDescriptor(
             ParcelFileDescriptor.MODE_READ_ONLY,
             object : ProxyFileDescriptorCallback() {
                 override fun onGetSize(): Long {
-                    Log.d("anni", "getSize, file = ${file.path}, requested = $requested, size = $size")
                     while (!requested) {
                         Thread.sleep(100)
                     }
@@ -314,26 +318,22 @@ class AnniProvider : DocumentsProvider() {
                 }
 
                 @Throws(ErrnoException::class)
-                override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
+                override fun onRead(offset: Long, sizeToRead: Int, data: ByteArray): Int {
                     try {
-                        Log.d("anni", "file = ${file.path}, offset = $offset, size = $size")
-                        if (fis == null) {
-                            fis = FileInputStream(file)
-                        }
-
                         // wait for file download
                         var len: Long = file.length()
-                        // if len >= size, file fully downloaded, ignore
-                        // if len < size and length got is less than needed(offset + size)
-                        while (len < size && len < offset + size) {
-                            Log.d("anni", "file = ${file.path}, length = $len, offset = $offset, size = $size")
-                            Thread.sleep(200)
+                        while (len < size && len <= offset + sizeToRead) {
+                            Log.d("anni", "file = ${file.path}, length = $len, offset = $offset")
+                            Thread.sleep(50)
                             len = file.length()
                         }
 
-                        val result = Os.pread(fis!!.fd, data, 0, size, offset)
-                        Log.d("anni", "file = ${file.path}, readResult = $result")
-                        return result
+                        val read = Os.pread(afd.fileDescriptor, data, 0, sizeToRead, offset)
+                        Log.d(
+                            "anni",
+                            "file = ${file.path}, len = ${file.length()}, offset = $offset, size = $sizeToRead, read = $read"
+                        )
+                        return read
                     } catch (errno: ErrnoException) {
                         Log.e("anni", "index = $documentId", errno)
                         throw errno
@@ -346,7 +346,7 @@ class AnniProvider : DocumentsProvider() {
 
                 override fun onRelease() {
                     thread.quitSafely()
-                    closeSilently(fis)
+                    closeSilently(afd)
                 }
             },
             handler
