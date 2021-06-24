@@ -1,17 +1,22 @@
 package moe.mmf.anni_amp
 
+import android.content.Context
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.database.MatrixCursor.RowBuilder
 import android.graphics.Point
-import android.os.Bundle
-import android.os.CancellationSignal
-import android.os.ParcelFileDescriptor
+import android.os.*
+import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
 import android.provider.MediaStore
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.text.TextUtils
+import android.util.Log
+import androidx.annotation.RequiresApi
 import androidx.room.Room
 import com.maxmpz.poweramp.player.TrackProviderConsts
 import io.ktor.client.*
@@ -27,8 +32,13 @@ import io.ktor.utils.io.core.*
 import kotlinx.coroutines.runBlocking
 import moe.mmf.anni_amp.repo.RepoDatabase
 import moe.mmf.anni_amp.repo.entities.Album
+import moe.mmf.anni_amp.repo.entities.Cache
 import moe.mmf.anni_amp.repo.entities.Track
+import java.io.Closeable
 import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import kotlin.concurrent.thread
 
 class AnniProvider : DocumentsProvider() {
     private lateinit var client: HttpClient
@@ -40,6 +50,7 @@ class AnniProvider : DocumentsProvider() {
                 serializer = GsonSerializer()
             }
             defaultRequest {
+//                host = "annil.mmf.moe"
                 host = "192.168.114.1"
                 port = 3614
                 url {
@@ -113,7 +124,7 @@ class AnniProvider : DocumentsProvider() {
                 // parentDocumentId is catalog
                 val tracks = db.trackDao().getAllTracks(parentDocumentId)
                 tracks?.forEach {
-                    fillURLTrackRow(this.newRow(), it, false)
+                    fillTrackRow(this.newRow(), it, false)
                 }
             }
         }
@@ -134,7 +145,7 @@ class AnniProvider : DocumentsProvider() {
                 val trackNumber = splited[1].toInt()
                 val track = db.trackDao().getTrack(catalog, trackNumber)
                 if (track != null) {
-                    fillURLTrackRow(this.newRow(), track, true)
+                    fillTrackRow(this.newRow(), track, true)
                 }
             }
         }
@@ -169,7 +180,7 @@ class AnniProvider : DocumentsProvider() {
         }
     }
 
-    private fun fillTrackRow(row: RowBuilder, track: Track) {
+    private fun fillTrackRow(row: RowBuilder, track: Track, sendMetadata: Boolean) {
         row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, "${track.catalog}/${track.track}")
         row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, "audio/flac")
         row.add(
@@ -177,14 +188,6 @@ class AnniProvider : DocumentsProvider() {
             "%02d. %s.flac".format(track.track, track.title)
         )
         row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, 0)
-    }
-
-    private fun fillURLTrackRow(row: RowBuilder, track: Track, sendMetadata: Boolean) {
-        fillTrackRow(row, track)
-
-        row.add(DocumentsContract.Document.COLUMN_FLAGS, DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL)
-        row.add(TrackProviderConsts.COLUMN_URL, TrackProviderConsts.DYNAMIC_URL)
-        row.add(MediaStore.Audio.AudioColumns.DURATION, 0)
 
         if (sendMetadata) {
             val album = db.albumDao().getAlbum(track.catalog)!!
@@ -195,6 +198,14 @@ class AnniProvider : DocumentsProvider() {
             row.add(TrackProviderConsts.COLUMN_ALBUM_ARTIST, album.artist)
             row.add(MediaStore.Audio.AudioColumns.TRACK, track.track)
         }
+    }
+
+    private fun fillURLTrackRow(row: RowBuilder, track: Track, sendMetadata: Boolean) {
+        fillTrackRow(row, track, sendMetadata)
+
+        row.add(DocumentsContract.Document.COLUMN_FLAGS, DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL)
+        row.add(TrackProviderConsts.COLUMN_URL, TrackProviderConsts.DYNAMIC_URL)
+        row.add(MediaStore.Audio.AudioColumns.DURATION, 0)
     }
 
     override fun openDocumentThumbnail(
@@ -221,8 +232,134 @@ class AnniProvider : DocumentsProvider() {
         return AssetFileDescriptor(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY), 0, 0)
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
     override fun openDocument(documentId: String?, mode: String?, signal: CancellationSignal?): ParcelFileDescriptor? {
-        return null
+        val split = documentId!!.split("/")
+        val catalog = split[0]
+        val trackId = split[1].toInt()
+
+        val directory = File(context!!.getExternalFilesDir(Environment.DIRECTORY_MUSIC), split[0])
+        val file = File(directory, "$trackId.flac")
+
+        val cache = db.cacheDao().getCache(catalog, trackId)
+        var size = cache?.size ?: 0
+        var requested = file.exists()
+
+        if (!file.exists()) {
+            directory.mkdirs()
+            thread {
+                runBlocking {
+                    client.get<HttpStatement>(path = documentId).execute { response ->
+                        if (response.status != HttpStatusCode.OK) {
+                            //TODO: error handling
+                        }
+
+                        // query db again
+                        val cacheInDb = db.cacheDao().getCache(catalog, trackId)
+                        // if any other requests has started downloading before this request
+                        // then skip downloading
+                        // else, start download
+                        //
+                        // if cacheInDb, it file should exist
+                        // if file does not exist, we need to download it again
+                        if (cacheInDb == null || !file.exists()) {
+                            // remove file if exists
+                            // this should not happen
+                            if (file.exists()) {
+                                file.delete()
+                            }
+
+                            // download file
+                            val channel: ByteReadChannel = response.receive()
+                            while (!channel.isClosedForRead) {
+                                val packet = channel.readRemaining(DEFAULT_BUFFER_SIZE.toLong())
+                                while (!packet.isEmpty) {
+                                    val bytes = packet.readBytes()
+                                    file.appendBytes(bytes)
+
+                                    if (!requested) {
+                                        // write size into db after first appendBytes
+                                        size = response.headers["X-Origin-Size"]!!.toLong()
+                                        db.cacheDao().insert(Cache(0, catalog, trackId, size))
+                                    }
+                                    // allow GetSize to read the correct size after bytes appended
+                                    requested = true
+                                }
+                            }
+                        } else {
+                            // update size with data stored in db
+                            size = cacheInDb.size
+                            requested = true
+                        }
+                    }
+                }
+            }
+        }
+
+        val thread = HandlerThread(documentId)
+        thread.start()
+        val handler = Handler(thread.looper)
+        var fis: FileInputStream? = null
+
+        val storage = context?.getSystemService(Context.STORAGE_SERVICE) as StorageManager
+        return storage.openProxyFileDescriptor(
+            ParcelFileDescriptor.MODE_READ_ONLY,
+            object : ProxyFileDescriptorCallback() {
+                override fun onGetSize(): Long {
+                    Log.d("anni", "getSize, file = ${file.path}, requested = $requested, size = $size")
+                    while (!requested) {
+                        Thread.sleep(100)
+                    }
+                    return size
+                }
+
+                @Throws(ErrnoException::class)
+                override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
+                    try {
+                        Log.d("anni", "file = ${file.path}, offset = $offset, size = $size")
+                        if (fis == null) {
+                            fis = FileInputStream(file)
+                        }
+
+                        // wait for file download
+                        var len: Long = file.length()
+                        // if len >= size, file fully downloaded, ignore
+                        // if len < size and length got is less than needed(offset + size)
+                        while (len < size && len < offset + size) {
+                            Log.d("anni", "file = ${file.path}, length = $len, offset = $offset, size = $size")
+                            Thread.sleep(200)
+                            len = file.length()
+                        }
+
+                        val result = Os.pread(fis!!.fd, data, 0, size, offset)
+                        Log.d("anni", "file = ${file.path}, readResult = $result")
+                        return result
+                    } catch (errno: ErrnoException) {
+                        Log.e("anni", "index = $documentId", errno)
+                        throw errno
+                    } catch (e: Throwable) {
+                        // other errors
+                        Log.e("anni", "throwable, index = $documentId", e)
+                        throw ErrnoException("onRead", OsConstants.EBADF)
+                    }
+                }
+
+                override fun onRelease() {
+                    thread.quitSafely()
+                    closeSilently(fis)
+                }
+            },
+            handler
+        )
+    }
+
+    private fun closeSilently(c: Closeable?) {
+        if (c != null) {
+            try {
+                c.close()
+            } catch (ex: IOException) {
+            }
+        }
     }
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
@@ -259,6 +396,7 @@ class AnniProvider : DocumentsProvider() {
     companion object {
         private const val BaseUrl: String = "http://192.168.114.1:3614"
         private const val Token: String =
+//            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE2MTkwNzQ1NDcsInR5cGUiOiJ1c2VyIiwidXNlcm5hbWUiOiJ0ZXN0IiwiYWxsb3dTaGFyZSI6dHJ1ZX0.z7ZsL9nqP1KDZhLjtsUzSn5bhx8-01w2XOVFdazRtVo"
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjAsInR5cGUiOiJ1c2VyIiwidXNlcm5hbWUiOiJ0ZXN0IiwiYWxsb3dTaGFyZSI6dHJ1ZX0.7CH27OBvUnJhKxBdtZbJSXA-JIwQ4MWqI5JsZ46NoKk"
     }
 }

@@ -1,12 +1,12 @@
 package moe.mmf.anni_amp.repo
 
+import android.util.Log
 import moe.mmf.anni_amp.repo.entities.Album
 import moe.mmf.anni_amp.repo.entities.Track
 import org.eclipse.jgit.api.Git
 import org.tomlj.Toml
 import org.tomlj.TomlParseResult
 import java.io.File
-import java.util.function.Supplier
 import kotlin.io.path.Path
 
 class RepoHelper(private var name: String, private var repo: String, root: File) {
@@ -73,6 +73,6 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
                     }
                 }
             }
-        print("finished")
+        Log.d("anni", "database construction finished")
     }
 }
