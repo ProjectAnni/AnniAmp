@@ -9,5 +9,6 @@ data class Cache(
     @PrimaryKey(autoGenerate = true) val id: Int,
     @ColumnInfo val catalog: String,
     @ColumnInfo(name = "track_id") val trackId: Int,
-    @ColumnInfo val size: Long,
+    @ColumnInfo var cached: Boolean,
+    @ColumnInfo var size: Long,
 )

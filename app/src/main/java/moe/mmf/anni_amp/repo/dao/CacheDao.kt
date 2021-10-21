@@ -1,8 +1,6 @@
 package moe.mmf.anni_amp.repo.dao
 
-import androidx.room.Dao
-import androidx.room.Insert
-import androidx.room.Query
+import androidx.room.*
 import moe.mmf.anni_amp.repo.entities.Cache
 
 @Dao
@@ -12,4 +10,7 @@ interface CacheDao {
 
     @Insert
     fun insert(cache: Cache)
+
+    @Update(onConflict = OnConflictStrategy.REPLACE)
+    fun update(cache: Cache)
 }

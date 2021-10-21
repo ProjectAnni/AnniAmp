@@ -9,6 +9,7 @@ import android.os.*
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
 import android.provider.MediaStore
+import android.util.Log
 import androidx.room.Room
 import com.maxmpz.poweramp.player.TrackProviderConsts
 import com.maxmpz.poweramp.player.TrackProviderProto
@@ -33,6 +34,7 @@ import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 class AnniProvider : DocumentsProvider() {
@@ -103,15 +105,14 @@ class AnniProvider : DocumentsProvider() {
                 val response: List<String> = runBlocking {
                     client.get(path = "albums")
                 }
-                for (catalog in response) {
-                    val album = db.albumDao().getAlbum(catalog)
-                    if (album != null) {
-                        fillAlbumRow(
-                            this.newRow(),
-                            album,
-                            TrackProviderConsts.FLAG_NO_SUBDIRS
-                        )
-                    }
+                val albums = db.albumDao().getAllAlbums()
+                    .filter { album -> response.contains(album.catalog) }
+                for (album in albums) {
+                    fillAlbumRow(
+                        this.newRow(),
+                        album,
+                        TrackProviderConsts.FLAG_NO_SUBDIRS
+                    )
                 }
             } else if (parentDocumentId != null) {
                 // parentDocumentId is catalog
@@ -126,7 +127,12 @@ class AnniProvider : DocumentsProvider() {
     override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
         return MatrixCursor(resolveDocumentProjection(projection)).apply {
             if (documentId == "annil") {
-                fillFolderRow(this.newRow(), documentId, documentId, TrackProviderConsts.FLAG_HAS_SUBDIRS)
+                fillFolderRow(
+                    this.newRow(),
+                    documentId,
+                    documentId,
+                    TrackProviderConsts.FLAG_HAS_SUBDIRS
+                )
             } else if (!documentId.contains("/")) {
                 val album = db.albumDao().getAlbum(documentId)
                 if (album != null) {
@@ -163,10 +169,16 @@ class AnniProvider : DocumentsProvider() {
 
     private fun fillFolderRow(row: RowBuilder, id: String, name: String, flags: Int) {
         row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, id)
-        row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.MIME_TYPE_DIR)
+        row.add(
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.MIME_TYPE_DIR
+        )
         row.add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, name)
         row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, 0)
-        row.add(DocumentsContract.Document.COLUMN_FLAGS, DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL)
+        row.add(
+            DocumentsContract.Document.COLUMN_FLAGS,
+            DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
+        )
         // If asked to add the subfolders hint, add it
         if (flags != 0) {
             row.add(TrackProviderConsts.COLUMN_FLAGS, flags)
@@ -175,7 +187,7 @@ class AnniProvider : DocumentsProvider() {
 
     private fun fillTrackRow(row: RowBuilder, track: Track, sendMetadata: Boolean) {
         row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, "${track.catalog}/${track.track}")
-        row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, "audio/flac")
+        row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, "audio/aac")
         row.add(
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             "%02d. %s.flac".format(track.track, track.title)
@@ -206,69 +218,85 @@ class AnniProvider : DocumentsProvider() {
                     .execute { saveChannelToFile(it.receive(), file) }
             }
         }
-        return AssetFileDescriptor(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY), 0, 0)
+        return AssetFileDescriptor(
+            ParcelFileDescriptor.open(
+                file,
+                ParcelFileDescriptor.MODE_READ_ONLY
+            ), 0, 0
+        )
     }
 
-    override fun openDocument(documentId: String?, mode: String?, signal: CancellationSignal?): ParcelFileDescriptor? {
+    override fun openDocument(
+        documentId: String?,
+        mode: String?,
+        signal: CancellationSignal?
+    ): ParcelFileDescriptor? {
+        Log.d("anni", "opening $documentId")
         val split = documentId!!.split("/")
         val catalog = split[0]
         val trackId = split[1].toInt()
 
         val directory = File(context!!.getExternalFilesDir(Environment.DIRECTORY_MUSIC), split[0])
-        val file = File(directory, "$trackId.flac")
+        val file = File(directory, "$trackId.anni.cache")
         if (!file.exists()) {
             directory.mkdirs()
-        }
-        if (!file.exists()) {
             file.createNewFile()
         }
 
-        val cache = db.cacheDao().getCache(catalog, trackId)
-        var size = cache?.size ?: -1
+        var cache = db.cacheDao().getCache(catalog, trackId)
+        var startCache = cache?.cached == true
+        val size = AtomicReference(cache?.size ?: -1)
 
         if (file.length() == 0L) {
             thread {
                 runBlocking {
                     client.get<HttpStatement>(path = documentId).execute { response ->
-                        // query db again
-                        val cacheInDb = db.cacheDao().getCache(catalog, trackId)
                         // if any other requests has started downloading before this request
                         // then skip downloading
                         // else, start download
                         //
                         // if cacheInDb, it file should exist
                         // if file does not exist or length == 0, we need to download it again
-                        if (cacheInDb == null || file.length() == 0L) {
-                            if (cacheInDb == null) {
+                        if (cache == null || file.length() == 0L) {
+                            if (cache == null) {
                                 // write size into db after first appendBytes
-                                size = response.headers["X-Origin-Size"]!!.toLong()
-                                db.cacheDao().insert(Cache(0, catalog, trackId, size))
+                                val originalSize = response.headers["X-Origin-Size"]!!.toLong()
+                                size.set(originalSize)
+                                db.cacheDao()
+                                    .insert(Cache(0, catalog, trackId, false, originalSize))
+                                cache = db.cacheDao().getCache(catalog, trackId)
+                                startCache = true
                             }
+                            Log.d("anni", "caching $documentId")
                             saveChannelToFile(response.receive(), file)
-                        } else {
-                            // update size with data stored in db
-                            size = cacheInDb.size
+                            cache!!.size = file.length()
+                            size.set(cache!!.size)
+                            cache!!.cached = true
+                            db.cacheDao().update(cache!!)
                         }
                     }
                 }
             }
         }
 
+        Log.d("anni", "cached = ${cache?.cached}, size = $size")
         // file fully cached, use raw fd
-        if (cache != null && file.length() == size) {
+        if (cache?.cached == true) {
+            Log.d("anni", "opening fd for $documentId")
             return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         }
 
         // wait for audio size
-        while (size < 0) {
+        while (!startCache) {
             Thread.sleep(50)
         }
+        Log.d("anni", "opening seekable socket for $documentId")
         return openViaSeekableSocket(file, size, signal)
     }
 
     private fun openViaSeekableSocket(
         file: File,
-        fileLength: Long,
+        fileLength: AtomicReference<Long>,
         signal: CancellationSignal?
     ): ParcelFileDescriptor? {
         val fds = ParcelFileDescriptor.createSocketPair()
@@ -279,11 +307,16 @@ class AnniProvider : DocumentsProvider() {
             try {
                 FileInputStream(file).use { fis ->
                     val ch = fis.channel
-                    TrackProviderProto(fds[1], fileLength).use { proto ->
+                    TrackProviderProto(fds[1], fileLength.get()).use { proto ->
                         // Send initial header
                         proto.sendHeader()
                         while (true) {
+                            if (signal?.isCanceled == true) {
+                                break
+                            }
+
                             var len = ch.read(buf)
+                            Log.v("anni/openViaSeekableSocket", "read $len bytes")
                             while (len > 0) {
                                 // move cursor to start
                                 buf.flip()
@@ -292,22 +325,30 @@ class AnniProvider : DocumentsProvider() {
                                 // NOTE: DO NOT SEND EMPTY BUFFER as this will cause premature EOF
                                 val seekRequestPos = proto.sendData(buf)
                                 // handle possible seek request
-                                handleSeekRequest(proto, seekRequestPos, ch, fileLength)
+                                handleSeekRequest(proto, seekRequestPos, ch, fileLength.get())
                                 buf.clear()
                                 len = ch.read(buf)
                             }
 
-                            if (ch.position() != fileLength) {
+                            if (fileLength.get() - ch.position() > 1000) {
                                 // wait for cache
                                 // add some wait here?
+                                Log.v(
+                                    "anni/openViaSeekableSocket",
+                                    "pos = ${ch.position()}, length = $fileLength, waiting for cache..."
+                                )
                                 continue
                             }
 
                             // EOF here
                             // handle the last potential seek
                             val seekRequestPos = proto.sendEOFAndWaitForSeekOrClose()
-                            if (!handleSeekRequest(proto, seekRequestPos, ch, fileLength)) {
+                            if (!handleSeekRequest(proto, seekRequestPos, ch, fileLength.get())) {
                                 // no seek request, close socket
+                                Log.d(
+                                    "anni/openViaSeekableSocket",
+                                    "close socket with ${fileLength.get()} bytes read"
+                                )
                                 break
                             }
                         }
@@ -321,7 +362,12 @@ class AnniProvider : DocumentsProvider() {
     }
 
     // handle seek, return whether seek is needed
-    private fun handleSeekRequest(proto: TrackProviderProto, seekPos: Long, ch: FileChannel, length: Long): Boolean {
+    private fun handleSeekRequest(
+        proto: TrackProviderProto,
+        seekPos: Long,
+        ch: FileChannel,
+        length: Long
+    ): Boolean {
         if (seekPos != TrackProviderProto.INVALID_SEEK_POS) {
             val newPos = seekTrack(ch, seekPos, length)
             proto.sendSeekResult(newPos)

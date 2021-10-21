@@ -2,6 +2,7 @@ package moe.mmf.anni_amp.repo.dao
 
 import androidx.room.Dao
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import moe.mmf.anni_amp.repo.entities.Track
 
@@ -15,4 +16,7 @@ interface TrackDao {
 
     @Insert
     fun insert(track: Track)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertAll(tracks: MutableList<Track>)
 }

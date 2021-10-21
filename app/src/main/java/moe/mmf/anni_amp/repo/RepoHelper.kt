@@ -21,7 +21,10 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
             .setURI(repo)
             .setDirectory(root)
             .call()
+
         val albumRoot = File(root, "album")
+        val albumList = mutableListOf<Album>()
+        val tracksList = mutableListOf<Track>()
         albumRoot.walkTopDown()
             .maxDepth(1)
             .forEach {
@@ -36,9 +39,16 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
                         val albumType = result.getString("album.type")!!
                         val albumCatalog = result.getString("album.catalog")!!
                         // insert album
-                        db.albumDao()
-                            .insert(Album(0, albumTitle, albumCatalog, albumArtist, albumReleaseDate.toString(), null))
-
+                        albumList.add(
+                            Album(
+                                0,
+                                albumTitle,
+                                albumCatalog,
+                                albumArtist,
+                                albumReleaseDate.toString(),
+                                null
+                            )
+                        )
                         val discs = result.getArray("discs")!!
                         for (i in 0 until discs.size()) {
                             val disc = discs.getTable(0)
@@ -47,17 +57,16 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
                             val discArtist = disc.getString("artist") { albumArtist }
                             val discType = disc.getString("type") { albumType }
                             if (discs.size() > 1) {
-                                db.albumDao()
-                                    .insert(
-                                        Album(
-                                            0,
-                                            discTitle,
-                                            discCatalog,
-                                            discArtist,
-                                            albumReleaseDate.toString(),
-                                            albumCatalog
-                                        )
+                                albumList.add(
+                                    Album(
+                                        0,
+                                        discTitle,
+                                        discCatalog,
+                                        discArtist,
+                                        albumReleaseDate.toString(),
+                                        albumCatalog
                                     )
+                                )
                             }
 
                             val tracks = disc.getArray("tracks")!!
@@ -66,12 +75,28 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
                                 val trackTitle = track.getString("title")!!
                                 val trackArtist = track.getString("artist") { discArtist }
                                 val trackType = track.getString("type") { discType }
-                                db.trackDao().insert(Track(0, discCatalog, j + 1, trackTitle, trackArtist, trackType))
+                                tracksList.add(
+                                    Track(
+                                        0,
+                                        discCatalog,
+                                        j + 1,
+                                        trackTitle,
+                                        trackArtist,
+                                        trackType
+                                    )
+                                )
                             }
                         }
                     }
                 }
             }
+        db.albumDao().insertAll(albumList)
+        db.trackDao().insertAll(tracksList)
         Log.d("anni", "database construction finished")
+    }
+
+    fun pull(db: RepoDatabase) {
+        var git = Git.open(root)
+        git.pull()
     }
 }
