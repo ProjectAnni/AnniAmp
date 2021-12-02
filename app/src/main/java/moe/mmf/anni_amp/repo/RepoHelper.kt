@@ -1,12 +1,16 @@
 package moe.mmf.anni_amp.repo
 
+import android.os.Build
 import android.util.Log
+import androidx.annotation.RequiresApi
 import moe.mmf.anni_amp.repo.entities.Album
 import moe.mmf.anni_amp.repo.entities.Track
 import org.eclipse.jgit.api.Git
 import org.tomlj.Toml
 import org.tomlj.TomlParseResult
+import org.tomlj.TomlTable
 import java.io.File
+import java.time.LocalDate
 import kotlin.io.path.Path
 
 class RepoHelper(private var name: String, private var repo: String, root: File) {
@@ -16,6 +20,7 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
         return !root.exists()
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
     fun initialize(db: RepoDatabase) {
         Git.cloneRepository()
             .setURI(repo)
@@ -35,9 +40,33 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
                         // only apply albums with no error
                         val albumTitle = result.getString("album.title")!!
                         val albumArtist = result.getString("album.artist")!!
-                        val albumReleaseDate = result.getLocalDate("album.date")!!
                         val albumType = result.getString("album.type")!!
                         val albumCatalog = result.getString("album.catalog")!!
+
+                        var albumReleaseDate = result.get("album.date")!!
+                        when (albumReleaseDate) {
+                            is String -> {}
+                            is TomlTable -> {
+                                val year = albumReleaseDate.getLong("year")!!
+                                var month = albumReleaseDate.getLong("month")
+                                if (month == null) {
+                                    month = 0
+                                }
+                                var day = albumReleaseDate.getLong("day")
+                                if (day == null) {
+                                    day = 0
+                                }
+                                albumReleaseDate = "${year}-${month}-${day}"
+                            }
+                            is LocalDate -> {
+                                albumReleaseDate = albumReleaseDate.toString()
+                            }
+                            else -> {
+                                // fallback, should not happen
+                                albumReleaseDate = "2021"
+                            }
+                        }
+
                         // insert album
                         albumList.add(
                             Album(
