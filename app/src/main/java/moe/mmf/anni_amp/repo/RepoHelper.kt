@@ -1,11 +1,15 @@
 package moe.mmf.anni_amp.repo
 
-import android.os.Build
 import android.util.Log
-import androidx.annotation.RequiresApi
+import io.ktor.client.*
+import io.ktor.client.call.*
+import io.ktor.client.request.*
+import io.ktor.client.statement.*
+import kotlinx.coroutines.runBlocking
 import moe.mmf.anni_amp.repo.entities.Album
 import moe.mmf.anni_amp.repo.entities.Track
-import org.eclipse.jgit.api.Git
+import moe.mmf.anni_amp.saveChannelToFile
+import moe.mmf.anni_amp.utils.UnzipUtils
 import org.tomlj.Toml
 import org.tomlj.TomlParseResult
 import org.tomlj.TomlTable
@@ -13,21 +17,24 @@ import java.io.File
 import java.time.LocalDate
 import kotlin.io.path.Path
 
-class RepoHelper(private var name: String, private var repo: String, root: File) {
-    private var root: File = File(root, name)
+class RepoHelper(name: String, private var repo: String, private var root: File) {
+    private var rootFolder: File = File(root, "$name-master")
+    private var rootFile: File = File(root, "repo.zip")
 
     fun needInitialize(): Boolean {
-        return !root.exists()
+        return !rootFolder.exists()
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
     fun initialize(db: RepoDatabase) {
-        Git.cloneRepository()
-            .setURI(repo)
-            .setDirectory(root)
-            .call()
+        runBlocking {
+            HttpClient().get<HttpStatement>("$repo/archive/refs/heads/master.zip")
+                .execute {
+                    saveChannelToFile(it.receive(), rootFile)
+                }
+        }
+        UnzipUtils.unzip(rootFile, root)
 
-        val albumRoot = File(root, "album")
+        val albumRoot = File(rootFolder, "album")
         val albumList = mutableListOf<Album>()
         val tracksList = mutableListOf<Track>()
         albumRoot.walkTopDown()
@@ -80,7 +87,7 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
                         )
                         val discs = result.getArray("discs")!!
                         for (i in 0 until discs.size()) {
-                            val disc = discs.getTable(0)
+                            val disc = discs.getTable(i)
                             val discCatalog = disc.getString("catalog")!!
                             val discTitle = disc.getString("title") { albumTitle }
                             val discArtist = disc.getString("artist") { albumArtist }
@@ -122,10 +129,5 @@ class RepoHelper(private var name: String, private var repo: String, root: File)
         db.albumDao().insertAll(albumList)
         db.trackDao().insertAll(tracksList)
         Log.d("anni", "database construction finished")
-    }
-
-    fun pull(db: RepoDatabase) {
-        var git = Git.open(root)
-        git.pull()
     }
 }

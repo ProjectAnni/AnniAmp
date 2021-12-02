@@ -16,13 +16,12 @@ import com.maxmpz.poweramp.player.TrackProviderProto
 import com.maxmpz.poweramp.player.TrackProviderProto.TrackProviderProtoClosed
 import io.ktor.client.*
 import io.ktor.client.call.*
-import io.ktor.client.engine.cio.*
+import io.ktor.client.engine.android.*
 import io.ktor.client.features.*
 import io.ktor.client.features.json.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
-import io.ktor.utils.io.*
 import io.ktor.utils.io.core.*
 import kotlinx.coroutines.runBlocking
 import moe.mmf.anni_amp.repo.RepoDatabase
@@ -42,7 +41,7 @@ class AnniProvider : DocumentsProvider() {
     private lateinit var db: RepoDatabase
 
     override fun onCreate(): Boolean {
-        this.client = HttpClient(CIO) {
+        this.client = HttpClient(Android) {
             install(JsonFeature) {
                 serializer = GsonSerializer()
             }
@@ -80,7 +79,10 @@ class AnniProvider : DocumentsProvider() {
             add(DocumentsContract.Root.COLUMN_TITLE, "Annil")
             add(DocumentsContract.Root.COLUMN_SUMMARY, "Yesterday17's Annil Library")
 
-            add(DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
+            add(
+                DocumentsContract.Root.COLUMN_FLAGS,
+                DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD,
+            )
             add(DocumentsContract.Root.COLUMN_ICON, R.mipmap.ic_launcher)
             add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "annil")
         }
@@ -177,7 +179,7 @@ class AnniProvider : DocumentsProvider() {
         row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, 0)
         row.add(
             DocumentsContract.Document.COLUMN_FLAGS,
-            DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
+            DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL or DocumentsContract.Document.FLAG_DIR_PREFERS_GRID
         )
         // If asked to add the subfolders hint, add it
         if (flags != 0) {
@@ -215,7 +217,9 @@ class AnniProvider : DocumentsProvider() {
         if (!file.exists()) {
             runBlocking {
                 client.get<HttpStatement>(path = "${URLEncoder.encode(catalog, "utf-8")}/cover")
-                    .execute { saveChannelToFile(it.receive(), file) }
+                    .execute {
+                        saveChannelToFile(it.receive(), file)
+                    }
             }
         }
         return AssetFileDescriptor(
@@ -391,17 +395,6 @@ class AnniProvider : DocumentsProvider() {
             ch.position()
         } catch (ex: IOException) {
             -1
-        }
-    }
-
-    // save file
-    private suspend fun saveChannelToFile(channel: ByteReadChannel, file: File) {
-        while (!channel.isClosedForRead) {
-            val packet = channel.readRemaining(DEFAULT_BUFFER_SIZE.toLong())
-            while (!packet.isEmpty) {
-                val bytes = packet.readBytes()
-                file.appendBytes(bytes)
-            }
         }
     }
 

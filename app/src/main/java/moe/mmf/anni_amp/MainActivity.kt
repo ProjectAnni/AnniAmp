@@ -13,8 +13,8 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         val repo = RepoHelper(
-            "Test",
-            "https://github.com/project-anni/repo.git",
+            "repo",
+            "https://github.com/project-anni/repo",
             applicationContext.dataDir,
         )
         if (repo.needInitialize()) {
